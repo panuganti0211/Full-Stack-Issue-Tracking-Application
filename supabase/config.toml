@@ -1,0 +1,9 @@
+
+[functions.send-notification-email]
+verify_jwt = true
+
+[functions.invite-member-by-email]
+verify_jwt = true
+
+[functions.check-due-dates]
+verify_jwt = false

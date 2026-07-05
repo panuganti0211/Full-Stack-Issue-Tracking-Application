@@ -1,0 +1,17 @@
+name: Due Date Cron
+
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+jobs:
+  check-due-dates:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger due-date edge function
+        run: |
+          curl -sf -X POST \
+            "${{ secrets.VITE_SUPABASE_URL }}/functions/v1/check-due-dates" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json"
