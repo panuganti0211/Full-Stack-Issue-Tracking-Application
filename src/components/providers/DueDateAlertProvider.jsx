@@ -2,7 +2,6 @@ import { useEffect } from "react";
 import toast from "react-hot-toast";
 import { useAuth } from "../../context/AuthContext";
 import { runDueDateAlerts } from "../../services/notifyService";
-import { triggerDueDateCheck } from "../../services/emailService";
 
 const CHECK_INTERVAL_MS = 15 * 60 * 1000;
 
@@ -21,10 +20,8 @@ const DueDateAlertProvider = ({ children }) => {
             { icon: "⏰" }
           );
         }
-
-        await triggerDueDateCheck();
       } catch {
-        // Edge function may not be deployed yet — in-app alerts still work
+        // Non-blocking — due-date emails are handled by the daily cron job
       }
     };
 

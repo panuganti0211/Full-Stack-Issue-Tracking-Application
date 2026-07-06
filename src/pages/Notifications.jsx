@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { Bell, CheckCheck } from "lucide-react";
 import toast from "react-hot-toast";
 import DashboardLayout from "../components/layouts/DashboardLayout";
 import EmptyState from "../components/ui/EmptyState";
+import ErrorState from "../components/ui/ErrorState";
 import Button from "../components/ui/Button";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { useAuth } from "../context/AuthContext";
@@ -13,7 +14,6 @@ import {
   markAllAsRead,
   subscribeToNotifications,
 } from "../services/notificationService";
-import { runDueDateAlerts } from "../services/notifyService";
 import { formatRelativeTime } from "../utils/format";
 
 const Notifications = () => {
@@ -21,22 +21,30 @@ const Notifications = () => {
   const { user } = useAuth();
   const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
-  const load = async () => {
-    const { data } = await getNotifications(user.id);
-    setNotifications(data || []);
+  const load = useCallback(async () => {
+    if (!user?.id) return;
+
+    setError(null);
+    const { data, error: fetchError } = await getNotifications(user.id);
+
+    if (fetchError) {
+      setError(fetchError.message);
+      setNotifications([]);
+    } else {
+      setNotifications(data || []);
+    }
+
     setLoading(false);
-  };
+  }, [user?.id]);
 
   useEffect(() => {
-    const init = async () => {
-      await runDueDateAlerts(user.id);
-      await load();
-    };
+    if (!user?.id) return;
 
-    init();
+    load();
     return subscribeToNotifications(user.id, () => load());
-  }, [user.id]);
+  }, [user?.id, load]);
 
   const handleClick = async (notification) => {
     if (!notification.is_read) {
@@ -81,6 +89,8 @@ const Notifications = () => {
               <CardSkeleton key={i} />
             ))}
           </div>
+        ) : error ? (
+          <ErrorState message={error} onRetry={load} />
         ) : notifications.length === 0 ? (
           <EmptyState
             icon={Bell}

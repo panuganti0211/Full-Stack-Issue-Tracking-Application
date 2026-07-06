@@ -1,7 +1,7 @@
 import { supabase } from "./supabase";
 
 export const getNotifications = async (userId) => {
-  return await supabase
+  const withTask = await supabase
     .from("notifications")
     .select(
       `
@@ -9,6 +9,14 @@ export const getNotifications = async (userId) => {
       task:tasks(id, title, workspace_id)
     `
     )
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false });
+
+  if (!withTask.error) return withTask;
+
+  return await supabase
+    .from("notifications")
+    .select("*")
     .eq("user_id", userId)
     .order("created_at", { ascending: false });
 };

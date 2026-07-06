@@ -1,5 +1,9 @@
 import { sendNotificationEmail } from "./emailService";
-import { checkDueDateAlerts } from "./notificationService";
+import {
+  checkDueDateAlerts,
+  createNotification,
+} from "./notificationService";
+import { supabase } from "./supabase";
 
 export const notifyUser = async ({
   userId,
@@ -23,16 +27,35 @@ export const notifyUser = async ({
 
 export const runDueDateAlerts = async (userId) => {
   const dueTasks = await checkDueDateAlerts(userId);
+  const alerted = [];
 
   for (const task of dueTasks) {
-    await notifyUser({
+    const alreadyNotified = await hasRecentDueDateAlert(userId, task.id);
+    if (alreadyNotified) continue;
+
+    const { error } = await createNotification({
       userId,
       message: `Task "${task.title}" is due soon`,
       taskId: task.id,
-      type: "due_date",
-      subject: `Due soon: ${task.title}`,
     });
+
+    if (!error) alerted.push(task);
   }
 
-  return dueTasks;
+  return alerted;
+};
+
+const hasRecentDueDateAlert = async (userId, taskId) => {
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+  const { data } = await supabase
+    .from("notifications")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("task_id", taskId)
+    .ilike("message", "%due soon%")
+    .gte("created_at", since)
+    .maybeSingle();
+
+  return !!data;
 };
