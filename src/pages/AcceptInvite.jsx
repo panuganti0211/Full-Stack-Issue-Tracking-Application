@@ -185,17 +185,6 @@ const AcceptInvite = () => {
     // but we drive the post-login flow ourselves here
     const { data: { session } } = await supabase.auth.getSession();
     if (session?.user) {
-      // CRITICAL: verify the logged-in email matches the invited email
-      const loggedInEmail = session.user.email?.toLowerCase().trim();
-      const targetEmail = invitedEmail.toLowerCase().trim();
-
-      if (loggedInEmail !== targetEmail) {
-        toast.error(`You logged in as ${session.user.email}, but the invitation is for ${invitedEmail}.`);
-        await signOut();
-        setContextMessage(`Please log in with the invited email address: ${invitedEmail}`);
-        return;
-      }
-
       await handleAlreadyAuthenticated(session.user);
     }
   };
