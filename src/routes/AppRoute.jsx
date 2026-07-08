@@ -13,6 +13,7 @@ import Settings, { WorkspaceSettings } from "../pages/Settings";
 import CreateWorkspace from "../pages/CreateWorkspace";
 import Workspace from "../pages/Workspace";
 import ShareView from "../pages/ShareView";
+import AcceptInvite from "../pages/AcceptInvite";
 import ProtectedRoute from "./ProtectedRoute";
 
 const AppRoutes = () => {
@@ -158,6 +159,10 @@ const AppRoutes = () => {
             </ProtectedRoute>
           }
         />
+
+        {/* Public route — must not be behind ProtectedRoute so unauthenticated
+            users and users on a different account can land here from invite emails */}
+        <Route path="/invite" element={<AcceptInvite />} />
 
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

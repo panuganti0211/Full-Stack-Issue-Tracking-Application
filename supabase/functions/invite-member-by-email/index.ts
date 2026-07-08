@@ -55,6 +55,7 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
     );
 
+    // Verify caller is an admin of this workspace
     const { data: callerMember } = await supabaseAdmin
       .from("workspace_members")
       .select("role")
@@ -70,9 +71,13 @@ Deno.serve(async (req) => {
     }
 
     const normalizedEmail = email.toLowerCase().trim();
-    let targetUserId: string | null = null;
-    let invited = false;
+    const appUrl = Deno.env.get("APP_URL") ?? "http://localhost:3000";
 
+    // Invite link always carries email + workspaceId so AcceptInvite page
+    // knows the context regardless of auth state on the device
+    const inviteLink = `${appUrl}/invite?email=${encodeURIComponent(normalizedEmail)}&workspaceId=${workspaceId}`;
+
+    // Check if this email already has a Supabase auth account
     const { data: listData } = await supabaseAdmin.auth.admin.listUsers({
       page: 1,
       perPage: 1000,
@@ -82,72 +87,120 @@ Deno.serve(async (req) => {
       (u) => u.email?.toLowerCase() === normalizedEmail
     );
 
-    if (existingUser) {
-      targetUserId = existingUser.id;
-    } else {
-      const appUrl = Deno.env.get("APP_URL") ?? "http://localhost:3000";
-      const { data: inviteData, error: inviteError } =
-        await supabaseAdmin.auth.admin.inviteUserByEmail(normalizedEmail, {
-          redirectTo: `${appUrl}/login`,
-        });
+    const resendKey = Deno.env.get("RESEND_API_KEY");
+    const fromEmail =
+      Deno.env.get("RESEND_FROM_EMAIL") ?? "TrackFlow <onboarding@resend.dev>";
 
-      if (inviteError) {
-        return new Response(JSON.stringify({ error: inviteError.message }), {
+    // ---------- REGISTERED USER ----------
+    if (existingUser) {
+      const targetUserId = existingUser.id;
+
+      // Check if already a member
+      const { data: existingMember } = await supabaseAdmin
+        .from("workspace_members")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .eq("user_id", targetUserId)
+        .maybeSingle();
+
+      if (existingMember) {
+        return new Response(
+          JSON.stringify({ error: "User is already a workspace member" }),
+          {
+            status: 409,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          }
+        );
+      }
+
+      // Add member immediately — they already have an account
+      const { data: member, error: memberError } = await supabaseAdmin
+        .from("workspace_members")
+        .insert({ workspace_id: workspaceId, user_id: targetUserId, role })
+        .select("id, role, joined_at, user_id")
+        .single();
+
+      if (memberError) {
+        return new Response(JSON.stringify({ error: memberError.message }), {
           status: 400,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
 
-      targetUserId = inviteData.user?.id ?? null;
-      invited = true;
-    }
+      // Send notification email via Resend with the /invite link
+      if (resendKey) {
+        await fetch("https://api.resend.com/emails", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${resendKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            from: fromEmail,
+            to: [normalizedEmail],
+            subject: "You've been added to a workspace on TrackFlow",
+            html: `
+              <div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:24px">
+                <h2 style="color:#4f46e5">TrackFlow Workspace Invite</h2>
+                <p>You have been added to a workspace as <strong>${role}</strong>.</p>
+                <p style="color:#64748b;font-size:14px">Click the button below to open the workspace. If you are signed in as a different account, you will be signed out and asked to log in with this email address.</p>
+                <a href="${inviteLink}" style="display:inline-block;margin-top:16px;padding:10px 20px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:8px">
+                  Open Workspace
+                </a>
+                <p style="color:#94a3b8;font-size:12px;margin-top:24px">This link is for <strong>${normalizedEmail}</strong> only.</p>
+              </div>
+            `,
+          }),
+        });
+      }
 
-    if (!targetUserId) {
-      return new Response(JSON.stringify({ error: "Could not resolve user" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
+      const { data: profile } = await supabaseAdmin
+        .from("profiles")
+        .select("id, full_name, avatar_url")
+        .eq("id", targetUserId)
+        .maybeSingle();
 
-    const { data: existingMember } = await supabaseAdmin
-      .from("workspace_members")
-      .select("id")
-      .eq("workspace_id", workspaceId)
-      .eq("user_id", targetUserId)
-      .maybeSingle();
-
-    if (existingMember) {
       return new Response(
-        JSON.stringify({ error: "User is already a workspace member" }),
+        JSON.stringify({
+          success: true,
+          invited: false,
+          member: { ...member, profiles: profile },
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // ---------- NON-REGISTERED USER ----------
+    // Do NOT create a workspace_members row yet.
+    // Store a pending invite in workspace_invitations so AcceptInvite page
+    // can complete the membership after the user registers and authenticates.
+
+    // Upsert: if a pending invite already exists for this email+workspace, refresh it
+    const { error: inviteUpsertError } = await supabaseAdmin
+      .from("workspace_invitations")
+      .upsert(
         {
-          status: 409,
+          workspace_id: workspaceId,
+          email: normalizedEmail,
+          role,
+          invited_by: user.id,
+          // updated_at will be refreshed automatically if column exists,
+          // otherwise the row is simply replaced
+        },
+        { onConflict: "workspace_id,email" }
+      );
+
+    if (inviteUpsertError) {
+      return new Response(
+        JSON.stringify({ error: inviteUpsertError.message }),
+        {
+          status: 400,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         }
       );
     }
 
-    const { data: member, error: memberError } = await supabaseAdmin
-      .from("workspace_members")
-      .insert({
-        workspace_id: workspaceId,
-        user_id: targetUserId,
-        role,
-      })
-      .select("id, role, joined_at, user_id")
-      .single();
-
-    if (memberError) {
-      return new Response(JSON.stringify({ error: memberError.message }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    const resendKey = Deno.env.get("RESEND_API_KEY");
-    const fromEmail =
-      Deno.env.get("RESEND_FROM_EMAIL") ?? "TrackFlow <onboarding@resend.dev>";
-    const appUrl = Deno.env.get("APP_URL") ?? "http://localhost:3000";
-
+    // Send invitation email via Resend
     if (resendKey) {
       await fetch("https://api.resend.com/emails", {
         method: "POST",
@@ -158,37 +211,25 @@ Deno.serve(async (req) => {
         body: JSON.stringify({
           from: fromEmail,
           to: [normalizedEmail],
-          subject: invited
-            ? "You've been invited to TrackFlow"
-            : "You've been added to a workspace on TrackFlow",
+          subject: "You've been invited to TrackFlow",
           html: `
             <div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:24px">
               <h2 style="color:#4f46e5">TrackFlow Workspace Invite</h2>
-              <p>You have been ${invited ? "invited to join" : "added to"} a workspace as <strong>${role}</strong>.</p>
-              <a href="${appUrl}/login" style="display:inline-block;margin-top:16px;padding:10px 20px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:8px">
-                Open TrackFlow
+              <p>You have been invited to join a workspace as <strong>${role}</strong>.</p>
+              <p style="color:#64748b;font-size:14px">You don't have a TrackFlow account yet. Click the button below and sign in with Google to create your account and join the workspace automatically.</p>
+              <a href="${inviteLink}" style="display:inline-block;margin-top:16px;padding:10px 20px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:8px">
+                Accept Invitation
               </a>
+              <p style="color:#94a3b8;font-size:12px;margin-top:24px">This invitation is for <strong>${normalizedEmail}</strong> only.</p>
             </div>
           `,
         }),
       });
     }
 
-    const { data: profile } = await supabaseAdmin
-      .from("profiles")
-      .select("id, full_name, avatar_url")
-      .eq("id", targetUserId)
-      .maybeSingle();
-
     return new Response(
-      JSON.stringify({
-        success: true,
-        invited,
-        member: { ...member, profiles: profile },
-      }),
-      {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      }
+      JSON.stringify({ success: true, invited: true, member: null }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (err) {
     return new Response(JSON.stringify({ error: err.message }), {
