@@ -73,9 +73,10 @@ Deno.serve(async (req) => {
     const normalizedEmail = email.toLowerCase().trim();
     const appUrl = Deno.env.get("APP_URL") ?? "http://localhost:3000";
 
-    // Invite link always carries email + workspaceId so AcceptInvite page
-    // knows the context regardless of auth state on the device
-    const inviteLink = `${appUrl}/invite?email=${encodeURIComponent(normalizedEmail)}&workspaceId=${workspaceId}`;
+    // After clicking the Supabase invite email, the user lands here.
+    // AcceptInvite page reads email + workspaceId to verify session and
+    // add the user to the workspace.
+    const redirectTo = `${appUrl}/invite?email=${encodeURIComponent(normalizedEmail)}&workspaceId=${workspaceId}`;
 
     // Check if this email already has a Supabase auth account
     const { data: listData } = await supabaseAdmin.auth.admin.listUsers({
@@ -87,11 +88,7 @@ Deno.serve(async (req) => {
       (u) => u.email?.toLowerCase() === normalizedEmail
     );
 
-    const resendKey = Deno.env.get("RESEND_API_KEY");
-    const fromEmail =
-      Deno.env.get("RESEND_FROM_EMAIL") ?? "TrackFlow <onboarding@resend.dev>";
-
-    // ---------- REGISTERED USER ----------
+    // ── REGISTERED USER ───────────────────────────────────────────────────────
     if (existingUser) {
       const targetUserId = existingUser.id;
 
@@ -127,32 +124,12 @@ Deno.serve(async (req) => {
         });
       }
 
-      // Send notification email via Resend with the /invite link
-      if (resendKey) {
-        await fetch("https://api.resend.com/emails", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${resendKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            from: fromEmail,
-            to: [normalizedEmail],
-            subject: "You've been added to a workspace on TrackFlow",
-            html: `
-              <div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:24px">
-                <h2 style="color:#4f46e5">TrackFlow Workspace Invite</h2>
-                <p>You have been added to a workspace as <strong>${role}</strong>.</p>
-                <p style="color:#64748b;font-size:14px">Click the button below to open the workspace. If you are signed in as a different account, you will be signed out and asked to log in with this email address.</p>
-                <a href="${inviteLink}" style="display:inline-block;margin-top:16px;padding:10px 20px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:8px">
-                  Open Workspace
-                </a>
-                <p style="color:#94a3b8;font-size:12px;margin-top:24px">This link is for <strong>${normalizedEmail}</strong> only.</p>
-              </div>
-            `,
-          }),
-        });
-      }
+      // Send notification email via Supabase (works for ANY email, no domain needed).
+      // redirectTo carries /invite?email=&workspaceId= so AcceptInvite page
+      // verifies the session email matches and redirects to workspace.
+      await supabaseAdmin.auth.admin.inviteUserByEmail(normalizedEmail, {
+        redirectTo,
+      });
 
       const { data: profile } = await supabaseAdmin
         .from("profiles")
@@ -170,12 +147,9 @@ Deno.serve(async (req) => {
       );
     }
 
-    // ---------- NON-REGISTERED USER ----------
-    // Do NOT create a workspace_members row yet.
-    // Store a pending invite in workspace_invitations so AcceptInvite page
-    // can complete the membership after the user registers and authenticates.
-
-    // Upsert: if a pending invite already exists for this email+workspace, refresh it
+    // ── NON-REGISTERED USER ───────────────────────────────────────────────────
+    // Store a pending invite so AcceptInvite can complete the membership
+    // after the user authenticates via Google OAuth on the /invite page.
     const { error: inviteUpsertError } = await supabaseAdmin
       .from("workspace_invitations")
       .upsert(
@@ -184,8 +158,6 @@ Deno.serve(async (req) => {
           email: normalizedEmail,
           role,
           invited_by: user.id,
-          // updated_at will be refreshed automatically if column exists,
-          // otherwise the row is simply replaced
         },
         { onConflict: "workspace_id,email" }
       );
@@ -200,37 +172,29 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Send invitation email via Resend
-    if (resendKey) {
-      await fetch("https://api.resend.com/emails", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${resendKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          from: fromEmail,
-          to: [normalizedEmail],
-          subject: "You've been invited to TrackFlow",
-          html: `
-            <div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:24px">
-              <h2 style="color:#4f46e5">TrackFlow Workspace Invite</h2>
-              <p>You have been invited to join a workspace as <strong>${role}</strong>.</p>
-              <p style="color:#64748b;font-size:14px">You don't have a TrackFlow account yet. Click the button below and sign in with Google to create your account and join the workspace automatically.</p>
-              <a href="${inviteLink}" style="display:inline-block;margin-top:16px;padding:10px 20px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:8px">
-                Accept Invitation
-              </a>
-              <p style="color:#94a3b8;font-size:12px;margin-top:24px">This invitation is for <strong>${normalizedEmail}</strong> only.</p>
-            </div>
-          `,
-        }),
-      });
+    // Send invite email via Supabase — works for ANY email address.
+    // The magic link redirects to /invite where AcceptInvite shows Google OAuth
+    // button for the user to register and join the workspace.
+    const { error: supabaseInviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(
+      normalizedEmail,
+      { redirectTo }
+    );
+
+    if (supabaseInviteError) {
+      return new Response(
+        JSON.stringify({ error: supabaseInviteError.message }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        }
+      );
     }
 
     return new Response(
       JSON.stringify({ success: true, invited: true, member: null }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
+
   } catch (err) {
     return new Response(JSON.stringify({ error: err.message }), {
       status: 500,
