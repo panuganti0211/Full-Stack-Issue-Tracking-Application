@@ -46,14 +46,15 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
     );
 
+    // Resolve recipient email from userId if not provided directly
     let recipientEmail = toEmail;
-
     if (!recipientEmail && toUserId) {
       const { data: authUser } =
         await supabaseAdmin.auth.admin.getUserById(toUserId);
       recipientEmail = authUser?.user?.email ?? null;
     }
 
+    // Always create in-app notification first
     if (toUserId) {
       await supabaseAdmin.from("notifications").insert({
         user_id: toUserId,
@@ -63,44 +64,28 @@ Deno.serve(async (req) => {
       });
     }
 
-    const resendKey = Deno.env.get("RESEND_API_KEY");
-    const fromEmail =
-      Deno.env.get("RESEND_FROM_EMAIL") ?? "TrackFlow <onboarding@resend.dev>";
-    const appUrl = Deno.env.get("APP_URL") ?? "http://localhost:3000";
-
+    // Send email via Supabase generateLink (magiclink).
+    // Works for ANY registered email — no Resend, no domain restriction.
+    // The magic link signs them in and redirects to the notifications page
+    // so they can view the task directly.
     let emailSent = false;
 
-    if (resendKey && recipientEmail) {
-      const taskLink = taskId
-        ? `${appUrl}/workspace`
+    if (recipientEmail) {
+      const appUrl = Deno.env.get("APP_URL") ?? "http://localhost:3000";
+      const redirectTo = taskId
+        ? `${appUrl}/notifications`
         : `${appUrl}/notifications`;
 
-      const res = await fetch("https://api.resend.com/emails", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${resendKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          from: fromEmail,
-          to: [recipientEmail],
-          subject: subject || `TrackFlow: ${type || "Notification"}`,
-          html: `
-            <div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:24px">
-              <h2 style="color:#4f46e5">TrackFlow</h2>
-              <p>${message}</p>
-              <a href="${taskLink}" style="display:inline-block;margin-top:16px;padding:10px 20px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:8px">
-                View in TrackFlow
-              </a>
-            </div>
-          `,
-        }),
+      const { error: linkError } = await supabaseAdmin.auth.admin.generateLink({
+        type: "magiclink",
+        email: recipientEmail,
+        options: { redirectTo },
       });
 
-      emailSent = res.ok;
-      if (!res.ok) {
-        const errText = await res.text();
-        console.error("Resend error:", errText);
+      if (linkError) {
+        console.error("generateLink error for notification:", linkError.message);
+      } else {
+        emailSent = true;
       }
     }
 

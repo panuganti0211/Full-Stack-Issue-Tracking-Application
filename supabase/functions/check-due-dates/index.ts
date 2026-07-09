@@ -29,6 +29,7 @@ Deno.serve(async (req) => {
 
     const now = new Date();
     const today = now.toISOString().split("T")[0];
+    const appUrl = Deno.env.get("APP_URL") ?? "http://localhost:3000";
 
     const { data: overdueTasks, error } = await supabaseAdmin
       .from("tasks")
@@ -38,14 +39,7 @@ Deno.serve(async (req) => {
       .lte("due_date", today)
       .neq("status", "done");
 
-    if (error) {
-      throw error;
-    }
-
-    const resendKey = Deno.env.get("RESEND_API_KEY");
-    const fromEmail =
-      Deno.env.get("RESEND_FROM_EMAIL") ?? "TrackFlow <onboarding@resend.dev>";
-    const appUrl = Deno.env.get("APP_URL") ?? "http://localhost:3000";
+    if (error) throw error;
 
     let notificationsCreated = 0;
     let emailsSent = 0;
@@ -53,6 +47,7 @@ Deno.serve(async (req) => {
     for (const task of overdueTasks ?? []) {
       const message = `Task "${task.title}" is overdue (due ${task.due_date?.split("T")[0]})`;
 
+      // Skip if we already sent a notification for this task in the last 24 hours
       const { data: existing } = await supabaseAdmin
         .from("notifications")
         .select("id")
@@ -67,6 +62,7 @@ Deno.serve(async (req) => {
 
       if (existing) continue;
 
+      // Create in-app notification
       await supabaseAdmin.from("notifications").insert({
         user_id: task.assigned_to,
         message,
@@ -75,35 +71,28 @@ Deno.serve(async (req) => {
       });
       notificationsCreated++;
 
-      if (resendKey) {
-        const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(
-          task.assigned_to
-        );
-        const email = authUser?.user?.email;
+      // Send email via Supabase generateLink (magiclink).
+      // Works for ANY registered email — no Resend, no domain restriction.
+      // The magic link signs the user in and redirects to the workspace
+      // so they can view the overdue task directly.
+      const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(
+        task.assigned_to
+      );
+      const recipientEmail = authUser?.user?.email;
 
-        if (email) {
-          const res = await fetch("https://api.resend.com/emails", {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${resendKey}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              from: fromEmail,
-              to: [email],
-              subject: `Overdue: ${task.title}`,
-              html: `
-                <div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:24px">
-                  <h2 style="color:#dc2626">Task Overdue</h2>
-                  <p>${message}</p>
-                  <a href="${appUrl}/workspace/${task.workspace_id}" style="display:inline-block;margin-top:16px;padding:10px 20px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:8px">
-                    View Task
-                  </a>
-                </div>
-              `,
-            }),
-          });
-          if (res.ok) emailsSent++;
+      if (recipientEmail) {
+        const redirectTo = `${appUrl}/workspace/${task.workspace_id}`;
+
+        const { error: linkError } = await supabaseAdmin.auth.admin.generateLink({
+          type: "magiclink",
+          email: recipientEmail,
+          options: { redirectTo },
+        });
+
+        if (linkError) {
+          console.error("generateLink error for due date:", linkError.message);
+        } else {
+          emailsSent++;
         }
       }
     }

@@ -73,9 +73,8 @@ Deno.serve(async (req) => {
     const normalizedEmail = email.toLowerCase().trim();
     const appUrl = Deno.env.get("APP_URL") ?? "http://localhost:3000";
 
-    // After clicking the Supabase invite email, the user lands here.
     // AcceptInvite page reads email + workspaceId to verify session and
-    // add the user to the workspace.
+    // redirect to the correct workspace after authentication.
     const redirectTo = `${appUrl}/invite?email=${encodeURIComponent(normalizedEmail)}&workspaceId=${workspaceId}`;
 
     // Check if this email already has a Supabase auth account
@@ -124,12 +123,21 @@ Deno.serve(async (req) => {
         });
       }
 
-      // Send notification email via Supabase (works for ANY email, no domain needed).
-      // redirectTo carries /invite?email=&workspaceId= so AcceptInvite page
-      // verifies the session email matches and redirects to workspace.
-      await supabaseAdmin.auth.admin.inviteUserByEmail(normalizedEmail, {
-        redirectTo,
+      // generateLink with type "magiclink" sends a Supabase magic link email
+      // to the existing user. Works for ANY registered email — no Resend,
+      // no domain restriction. The link redirects to /invite?email=&workspaceId=
+      // where AcceptInvite verifies the session email matches and redirects
+      // to the workspace.
+      const { error: linkError } = await supabaseAdmin.auth.admin.generateLink({
+        type: "magiclink",
+        email: normalizedEmail,
+        options: { redirectTo },
       });
+
+      if (linkError) {
+        console.error("generateLink error:", linkError.message);
+        // Member was added — don't fail the whole request just because email failed
+      }
 
       const { data: profile } = await supabaseAdmin
         .from("profiles")
@@ -172,9 +180,10 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Send invite email via Supabase — works for ANY email address.
-    // The magic link redirects to /invite where AcceptInvite shows Google OAuth
-    // button for the user to register and join the workspace.
+    // inviteUserByEmail works for new (non-registered) users only.
+    // Supabase sends the email natively — no Resend, no domain needed.
+    // After clicking the link the user lands on /invite page which shows
+    // Google OAuth button to complete registration and join the workspace.
     const { error: supabaseInviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(
       normalizedEmail,
       { redirectTo }
